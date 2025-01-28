@@ -4,11 +4,12 @@ Read ds18B20 sensors and publish to mqtt broker on wlan
 Uses pi pico W with sensors on pin 22, GPIO22.
 """
 
-from machine import Pin
 import time
-import network
 import onewire
 import ds18x20
+import network
+from machine import Pin
+from machine import reset
 from lib.umqtt.simple import MQTTClient
 
 # passwords etc
@@ -23,7 +24,7 @@ sensor_dict = {
     "atc/boiler_return/boiler": bytearray(b'(\x81\xdd\xcb\x04\x00\x00B')
 }
 
-# pi pico W on board LED
+# pi pico W on board LED - wont work on standard pi pico
 led_pin = Pin("LED", Pin.OUT)
 led_pin.off()
 
@@ -52,71 +53,93 @@ def mqtt_connect(sec: dict[str, str]):
     return client
 
 def wlan_connect(sec: dict[str, str]):
-    wlan = network.WLAN(network.STA_IF)
-    wlan.active(True)
-    # keep trying
-    while not wlan.isconnected():
-        print(f'Connecting to wlan, {sec["ssid"]}')
-        wlan.connect(sec["ssid"], sec["password"])
-        flash_led(5, 0.1)
-    print(f'Connected to {sec["ssid"]}')
-    flash_led(1, 1.0)
+    wlan = None
+    try:
+        wlan = network.WLAN(network.STA_IF)
+        wlan.active(True)
+        for wl in wlan.scan():
+            print(wl)
+        # keep trying
+        while not wlan.isconnected():
+            print(f'Connecting to wlan, {sec["ssid"]}')
+            wlan.connect(sec["ssid"], sec["password"])
+            flash_led(1, 0.9)
+            time.sleep(3) # give things time to settle on wlan object
+        else:
+            print(wlan.status(), "rssi", wlan.status('rssi'))
+            print(f'Connected to {sec["ssid"]}')
+    except Exception as e:
+        print("Failed to use wlan, not available?", e)
+        raise
     return wlan
 
 def read_and_publish(client: MQTTClient, ds_sensor: ds18x20.DS18X20, sensors: list):
-    ds_sensor.convert_temp()
-    
-    # about to read, also gives above convert_temp() time to work
-    flash_led(1, 0.9)
+    try:
+        ds_sensor.convert_temp()
+        
+        # about to read, also gives above convert_temp() time to work
+        flash_led(1, 0.9)
 
-    for sensor in sensors:
-        tempC = ds_sensor.read_temp(sensor)
-        if tempC is not None:
-            sensor_found = False
-            # find correct topic for this sensor
-            for topic, addr in sensor_dict.items():
-                if addr == sensor:
-                    sensor_found = True
-                    print(f'{topic}    {tempC:0.1f} degC')
-                    client.publish(topic, f'{tempC:0.1f}')
-                    break
-            if not sensor_found:
-                print(f'Unexpected sensor: {sensor} {tempC:0.1f} degC')
+        for sensor in sensors:
+            tempC = ds_sensor.read_temp(sensor)
+            if tempC is not None:
+                sensor_found = False
+                # find correct topic for this sensor
+                for topic, addr in sensor_dict.items():
+                    if addr == sensor:
+                        sensor_found = True
+                        print(f'{topic}    {tempC:0.1f} degC')
+                        client.publish(topic, f'{tempC:0.1f}')
+                        break
+                if not sensor_found:
+                    print(f'Unexpected sensor: {sensor} {tempC:0.1f} degC')
 
-    # wait 60 seconds between reads
-    flash_led(60, 0.2)
+        # wait 60 seconds between reads
+        flash_led(60, 0.2)
 
+    except Exception:
+        raise e
 
-# show we are starting up
-flash_led(3, 0.1)
 
 # scan for one wire sensors
 ds_sensor = ds18x20.DS18X20(onewire.OneWire(ds_pin))
 sensors = ds_sensor.scan()
+print(f'Found {len(sensors)} sensors')
+for sensor in sensors:
+    print(sensor)
 
-print(f'Found sensors, {len(sensors)}: {sensors}')
-if len(sensors):
-    while True:
-        wlan = wlan_connect(secrets.my_secrets)
+try: 
+    if len(sensors) == 0:
+        print("No sensors, exiting")
+    else:
+        while True:
+            wlan = wlan_connect(secrets.my_secrets)
 
-        try:
-            client = mqtt_connect(secrets.my_secrets)
-            if client is not None:
-                print('Reading sensors and publishing to mqtt server')
-                while True:
-                    try:
-                        read_and_publish(client, ds_sensor, sensors)
-                    except KeyboardInterrupt:
-                        break
-                    except Exception as e:
-                        print(f"Failed to publish: {e}")
-                        break
+            try:
+                client = mqtt_connect(secrets.my_secrets)
+                if client is not None:
+                    print('Reading sensors and publishing to mqtt server')
+                    while True:
+                        try:
+                            read_and_publish(client, ds_sensor, sensors)
+                        except KeyboardInterrupt:
+                            break
+                        except Exception as e:
+                            print(f"Failed to publish: {e}")
+                            break
 
-        except OSError as e:
-            print(f'Failed to connect to mqttt broker {secrets.my_secrets["mqtt_broker"]}, ', e)
+            except OSError as e:
+                print(f'Failed to connect to mqttt broker {secrets.my_secrets["mqtt_broker"]}, ', e)
 
-        wlan.disconnect()
-        
-led_pin.off()
-print("Exited")
+            wlan.disconnect()
+            
+except Exception:
+    pass
+
+for _ in range(5):
+    print("Exited")
+    flash_led(1, 0.01)
+    
+reset()
+
 
